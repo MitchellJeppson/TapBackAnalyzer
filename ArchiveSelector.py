@@ -28,9 +28,9 @@ class ArchiveSelector:
         if(not self.window.filename.endswith("chat.db")):
             messagebox.showerror("Error", "Bad File Selection")
         else:
-            conn = sqlite3.connect(self.window.filename)
-            chats = conn.execute("select distinct chat.display_name from chat where not chat.display_name='';")
-            self.setupDates()
+            self.conn = sqlite3.connect(self.window.filename)
+            chats = self.conn.execute("select distinct chat.display_name from chat where not chat.display_name='';")
+            # self.setupDates()
             self.setupListbox()
             for idx, row in enumerate(chats):
                 print(idx)
@@ -39,8 +39,14 @@ class ArchiveSelector:
 
     def chatSelected(self, selection):
         print(selection)
-        print(self.startDateEntry.get())
-        print(self.endDateEntry.get())
+        # print(self.startDateEntry.get())
+        # print(self.endDateEntry.get())
+        chatIndex = self.conn.execute("SELECT chat.ROWID FROM chat WHERE chat.display_name='"+selection.decode('utf-8')+"';")
+        chatIndex = chatIndex.fetchone()[0]
+        print(chatIndex)
+        messages = self.conn.execute("SELECT message.text, handle.id FROM chat, message, handle, chat_handle_join, chat_message_join WHERE chat.ROWID=chat_handle_join.chat_id AND chat.ROWID=chat_message_join.chat_id AND handle.ROWID=chat_handle_join.handle_id AND message.ROWID=chat_message_join.message_id AND message.handle_id=handle.ROWID AND (chat.ROWID="+str(chatIndex)+");")
+        for idx, row in enumerate(messages):
+            print(str(idx)+": "+str(row[1])+"- "+str(row[0]))
 
     def setupListbox(self):
         self.chatListbox = Listbox(self.window)
