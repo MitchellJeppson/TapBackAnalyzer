@@ -1,9 +1,58 @@
+from sqlite3.dbapi2 import Cursor
 from tkinter import Tk, Button, Label, filedialog, messagebox, Listbox, Entry
 import sqlite3
 import os
 import getpass
 from pathlib import Path
 import glob
+import re
+from json import JSONEncoder
+import plotly.plotly as py
+import plotly.graph_objs as go
+
+
+
+RE_EMOJI=re.compile('[\U00010000-\U0010ffff]|\U0000FFFC', flags=re.UNICODE)
+
+
+class StatsTracker(JSONEncoder):
+    def __init__(self, name="Default Name"):
+        self.name = name
+        self.loves = 0
+        self.thumbs_up = 0
+        self.thumbs_down = 0
+        self.lols = 0
+        self.emphasis = 0
+        self.questions = 0
+        self.messages = []
+
+    def addToMessages(self, message):
+        message = RE_EMOJI.sub(r'', message)
+        if len(self.messages) >= 10:
+            self.messages = self.messages[1:10]
+        self.messages.append(message)
+
+    def containsMessage(self, message):
+        message = RE_EMOJI.sub(r'', message)
+        return message in self.messages
+
+    def incrementLoves(self):
+        self.loves = self.loves + 1
+
+    def incrementThumbsUp(self):
+        self.thumbs_up = self.thumbs_up + 1
+
+    def incrementThumbsDown(self):
+        self.thumbs_down = self.thumbs_down + 1
+
+    def incrementLols(self):
+        self.lols = self.lols + 1
+
+    def incrementEmphasis(self):
+        self.emphasis = self.emphasis + 1
+
+    def incrementQuestions(self):
+        self.questions = self.questions + 1
 
 
 class ArchiveSelector:
@@ -39,14 +88,93 @@ class ArchiveSelector:
 
     def chatSelected(self, selection):
         print(selection)
-        # print(self.startDateEntry.get())
-        # print(self.endDateEntry.get())
         chatIndex = self.conn.execute("SELECT chat.ROWID FROM chat WHERE chat.display_name='"+selection.decode('utf-8')+"';")
         chatIndex = chatIndex.fetchone()[0]
         print(chatIndex)
-        messages = self.conn.execute("SELECT message.text, handle.id FROM chat, message, handle, chat_handle_join, chat_message_join WHERE chat.ROWID=chat_handle_join.chat_id AND chat.ROWID=chat_message_join.chat_id AND handle.ROWID=chat_handle_join.handle_id AND message.ROWID=chat_message_join.message_id AND message.handle_id=handle.ROWID AND (chat.ROWID="+str(chatIndex)+");")
-        for idx, row in enumerate(messages):
-            print(str(idx)+": "+str(row[1])+"- "+str(row[0]))
+        allMessages = self.conn.execute("select t1.text, datetime(t1.date/1000000000+strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date, id from message t1 inner join chat_message_join t2 on t2.chat_id=" + str(chatIndex) + " and t1.rowid=t2.message_id left join handle on t1.handle_id=handle.ROWID order by t1.date;").fetchall()
+        print("got all messages!")
+        allRecipients = self.conn.execute("select handle.id from chat, chat_handle_join, handle where chat.ROWID=chat_handle_join.chat_id AND chat_handle_join.handle_id=handle.ROWID AND chat.ROWID=" + str(chatIndex) + ";").fetchall()
+        allRecipients.append(["Me"])
+        print(chatIndex)
+        self.recipients = []
+        for recipient in allRecipients:
+            self.recipients.append(StatsTracker(recipient[0]))
+
+        # TODO: Currently has issues with emojies and likes on emoji text.
+        # TODO: Currently does not take into account images and "Laughed at an image".
+        for message in allMessages:
+            if message[0] == None: # i think this happends for like images or just blank texts?
+                continue
+            if message[0].startswith("Laughed at “") :
+                print("Found lol")
+                recipient = self.whichRecipientGetsThis(message[0][12:len(message[0])-1])
+                if recipient is None:
+                    print("break")
+                    continue
+                recipient.incrementLols()
+                continue
+            elif message[0].startswith("Liked “"):
+                print("Found Thumbsup")
+                recipient = self.whichRecipientGetsThis(message[0][7:len(message[0])-1])
+                if recipient is None:
+                    print("break")
+                    continue
+                recipient.incrementThumbsUp()
+                continue
+            elif message[0].startswith("Disliked “"):
+                print("Found Thumbsdown")
+                recipient = self.whichRecipientGetsThis(message[0][10:len(message[0])-1])
+                if recipient is None:
+                    print("break")
+                    continue
+                recipient.incrementThumbsDown()
+                continue
+            elif message[0].startswith("Loved “"):
+                print("Found love")
+                recipient = self.whichRecipientGetsThis(message[0][7:len(message[0])-1])
+                if recipient is None:
+                    print("break")
+                    continue
+                recipient.incrementLoves()
+                continue
+            elif message[0].startswith("Emphasized “"):
+                print("Found emphasis")
+                recipient = self.whichRecipientGetsThis(message[0][12:len(message[0])-1])
+                if recipient is None:
+                    print("break")
+                    continue
+                recipient.incrementEmphasis()
+                continue
+            elif message[0].startswith("Questioned “"):
+                print("Found QuestionMark")
+                recipient = self.whichRecipientGetsThis(message[0][12:len(message[0])-1])
+                if recipient is None:
+                    print("break")
+                    continue
+                recipient.incrementQuestions()
+                continue
+
+            rec = self.getRecipientById(message[2])
+            if rec is None:
+                print("bad getRecipientById")
+                print(message)
+                continue
+            rec.addToMessages(message[0])
+
+        self.plotThatShit()
+
+
+    def getRecipientById(self, id):
+        if id == None:
+            id = "Me"
+        for recipient in self.recipients:
+            if recipient.name == id:
+               return recipient
+
+        print("getRecipientById: no valid id found")
+        rec = StatsTracker(id)
+        self.recipients.append(rec)
+        return rec
 
     def setupListbox(self):
         self.chatListbox = Listbox(self.window)
@@ -62,3 +190,96 @@ class ArchiveSelector:
         self.endDateLabel.pack()
         self.endDateEntry = Entry(self.window)
         self.endDateEntry.pack()
+
+    def whichRecipientGetsThis(self, message):
+        message = RE_EMOJI.sub(r'', message)
+        for recipient in self.recipients:
+            if recipient.containsMessage(message):
+                return recipient
+
+        print("No recipient found? ")
+        return None
+
+
+    def plotThatShit(self):
+        print("pts")
+        recipientsNames = []
+        loves = []
+        likes = []
+        dislikes = []
+        laughs = []
+        emphasis = []
+        questions = []
+        for recipient in self.recipients:
+            if recipient.name == "+18018567377":
+                recipientsNames.append("Josh")
+            elif recipient.name == "+18013582230" or recipient.name == "austinemail@msn.com":
+                recipientsNames.append("Austin")
+            elif recipient.name == "+18019157142":
+                recipientsNames.append("Jordan")
+            elif recipient.name == "+13854398755":
+                recipientsNames.append("Tanner")
+            elif recipient.name == "+18018369681":
+                recipientsNames.append("Jeremy")
+            elif recipient.name == "+18014722033":
+                recipientsNames.append("Trevor")
+            elif recipient.name == "+18019608123":
+                recipientsNames.append("Connor")
+            elif recipient.name == "Me":
+                recipientsNames.append("Mitchell")
+
+            loves.append(recipient.loves)
+            likes.append(recipient.thumbs_up)
+            dislikes.append(recipient.thumbs_down)
+            laughs.append(recipient.lols)
+            emphasis.append(recipient.emphasis)
+            questions.append(recipient.questions)
+
+        # trace1 = go.Bar(
+        #     x=['giraffes', 'orangutans', 'monkeys'],
+        #     y=[20, 14, 23],
+        #     name='SF Zoo'
+        # )
+        # trace2 = go.Bar(
+        #     x=['giraffes', 'orangutans', 'monkeys'],
+        #     y=[12, 18, 29],
+        #     name='LA Zoo'
+        # )
+        trace1 = go.Bar(
+            x=recipientsNames,
+            y=loves,
+            name='Loves'
+        )
+        trace2 = go.Bar(
+            x=recipientsNames,
+            y=likes,
+            name='Likes'
+        )
+        trace3 = go.Bar(
+            x=recipientsNames,
+            y=dislikes,
+            name='Dislikes'
+        )
+        trace4 = go.Bar(
+            x=recipientsNames,
+            y=laughs,
+            name='Laughs'
+        )
+        trace5 = go.Bar(
+            x=recipientsNames,
+            y=emphasis,
+            name='Emphasis'
+        )
+        trace6 = go.Bar(
+            x=recipientsNames,
+            y=questions,
+            name='Questions'
+        )
+
+        data = [trace1, trace2, trace3, trace4, trace5, trace6]
+        layout = go.Layout(barmode='group')
+
+        fig = go.Figure(data=data, layout=layout)
+        m = py.plot(fig, filename='grouped-bar')
+        print(m)
+        print("done plotting")
